@@ -4,6 +4,7 @@ import io
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+import time
 
 # Configuración visual de la interfaz de usuario
 st.set_page_config(
@@ -108,10 +109,7 @@ if archivo_subido is not None:
         # --- Procesamiento del Archivo ---
         if st.button("Procesar Archivo Completo", type="primary"):
             
-            # Crear listas para almacenar los resultados
             resultados_corregidos = []
-            
-            # Barra de progreso visual
             barra_progreso = st.progress(0)
             estado_texto = st.empty()
             total_filas = len(df)
@@ -124,41 +122,57 @@ if archivo_subido is not None:
                     resultados_corregidos.append("")
                     continue
                 
-                estado_texto.text(f"Procesando fila {index + 1} de {total_filas}...")
+                estado_texto.text(f"⏳ Procesando fila {index + 1} de {total_filas}...")
                 
-                try:
-                    # Llamada a la API de Gemini para cada celda
-                    response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=texto_original,
-                        config=types.GenerateContentConfig(
-                            system_instruction=REGLAS_SISTEMA,
-                            temperature=0.1,
+                # Bucle de intento para manejar el Rate Limit dinámicamente
+                procesado_con_exito = False
+                intentos = 0
+                
+                while not procesado_con_exito and intentos < 3:
+                    try:
+                        # Llamada a la API de Gemini
+                        response = client.models.generate_content(
+                            model='gemini-2.5-flash',
+                            contents=texto_original,
+                            config=types.GenerateContentConfig(
+                                system_instruction=REGLAS_SISTEMA,
+                                temperature=0.1,
+                            )
                         )
-                    )
-                    resultados_corregidos.append(response.text.strip())
-                    
-                except APIError as e:
-                    if e.code == 429:
-                        st.error("⏳ Límite de cuota por minuto de la API alcanzado. Por favor, espera un momento.")
-                        st.stop()
-                    else:
-                        resultados_corregidos.append(f"Error API: {e.message}")
-                except Exception as e:
-                    resultados_corregidos.append(f"Error inesperado: {str(e)}")
+                        resultados_corregidos.append(response.text.strip())
+                        procesado_con_exito = True
+                        
+                        # PAUSA ESTRATÉGICA: Garantiza no superar las 15 solicitudes por minuto
+                        time.sleep(4.1) 
+                        
+                    except APIError as e:
+                        if e.code == 429:
+                            intentos += 1
+                            estado_texto.text(f"⚠️ Límites alcanzados en fila {index + 1}. Esperando 10 segundos para reintentar (Intento {intentos}/3)...")
+                            time.sleep(10)  # Espera un momento a que se libere la cuota de Google
+                        else:
+                            resultados_corregidos.append(f"Error API: {e.message}")
+                            procesado_con_exito = True
+                    except Exception as e:
+                        resultados_corregidos.append(f"Error inesperado: {str(e)}")
+                        procesado_con_exito = True
                 
-                # Actualizar barra de progreso
+                # Si falló los 3 intentos por límite de cuota
+                if not procesado_con_exito:
+                    resultados_corregidos.append("Error: No se pudo procesar por límite de cuota.")
+                
+                # Actualizar barra de progreso visual
                 barra_progreso.progress((index + 1) / total_filas)
             
             estado_texto.text("¡Procesamiento completo!")
             
-            # Insertar los datos procesados en una nueva columna en nuestro DataFrame
+            # Insertar los datos procesados en el DataFrame
             df["Texto Corregido (IA)"] = resultados_corregidos
             
             st.write("Muestra de los resultados procesados:")
             st.dataframe(df.head(5))
             
-            # --- Convertir el DataFrame modificado a un archivo Excel en memoria para descargarlo ---
+            # Convertir el DataFrame modificado a un archivo Excel en memoria
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False, sheet_name='Resultados_Corregidos')
